@@ -15,7 +15,7 @@ def ingest_pdf(pdf_path: str):
     """Load, chunk, embed, and store a PDF in the vector store."""
     chunks = load_and_chunk_pdf(pdf_path)
     texts = [c["text"] for c in chunks]
-    metadatas = [{"page": c["page"]} for c in chunks]
+    metadatas = [{"page": c["page"], "source_file": c["source_file"]} for c in chunks]
     ids = [f"chunk_{i}" for i in range(len(texts))]
 
     embeddings = embedding_model.encode(texts).tolist()
@@ -29,7 +29,7 @@ def ingest_pdf(pdf_path: str):
     print(f"Ingested {len(texts)} chunks from {pdf_path}")
 
 
-def retrieve(query: str, n_results: int = 3):
+def retrieve(query: str, n_results: int = 5):
     """Embed the query and fetch the most similar chunks, with metadata + scores."""
     query_embedding = embedding_model.encode(query).tolist()
     results = collection.query(
@@ -46,7 +46,8 @@ def retrieve(query: str, n_results: int = 3):
         sources.append({
             "text": text,
             "page": metadata["page"],
-            "similarity_score": round(1 - distance, 3),  # convert distance -> similarity
+            "source_file": metadata["source_file"],
+            "similarity_score": round(1 - distance, 3),
         })
     return sources
 

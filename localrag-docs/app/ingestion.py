@@ -1,5 +1,6 @@
 from pypdf import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from pathlib import Path
 
 splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
 
@@ -25,6 +26,7 @@ def load_and_chunk_pdf(pdf_path: str):
             all_chunks.append({
                 "text": chunk_text,
                 "page": page_number,
+                "source_file": Path(pdf_path).name,
             })
 
     return all_chunks
