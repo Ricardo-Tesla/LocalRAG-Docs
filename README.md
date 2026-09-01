@@ -53,6 +53,8 @@ All components are free, open-source, and run without any external network calls
 
 ```
 localrag-docs/
+├── .streamlit/
+│   └── config.toml        # UI theme configuration
 ├── app/
 │   ├── ingestion.py       # PDF loading and chunking, with page/source metadata
 │   ├── rag.py             # Embedding, vector storage, retrieval, prompt construction, generation
@@ -64,6 +66,12 @@ localrag-docs/
 ├── requirements.txt
 └── README.md
 ```
+
+## User Interface
+
+The interface is deliberately structured around daily use rather than one-off queries. Document upload is placed in a persistent sidebar, since ingesting a document is an occasional action, while asking questions is the primary, repeated interaction and is given the full main viewport. This mirrors the layout conventions of persistent knowledge-base tools rather than single-purpose form-style demos.
+
+The visual theme uses a warm, muted color palette (terracotta accents on a soft off-white background) configured through Streamlit's native theming system in `.streamlit/config.toml`, rather than ad hoc styling. This keeps every native widget — buttons, inputs, backgrounds — visually consistent without overriding Streamlit's component behavior.
 
 ## Setup and Installation
 
