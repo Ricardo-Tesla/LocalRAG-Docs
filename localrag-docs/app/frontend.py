@@ -1,6 +1,9 @@
 import streamlit as st
 import requests
 
+# Frontend and backend are intentionally separate processes. This file only
+# talks to the API over HTTP, the same way any external client would —
+# it has no direct access to the RAG pipeline's Python functions.
 API_URL = "http://127.0.0.1:8000"
 
 st.set_page_config(
@@ -9,7 +12,9 @@ st.set_page_config(
     layout="wide",
 )
 
-# --- Sidebar: document management ---
+# Upload lives in the sidebar rather than the main flow: ingesting a document
+# is an occasional action, while asking questions is the primary, repeated
+# one and deserves the full viewport.
 with st.sidebar:
     st.header("Documents")
     st.caption("Upload technical documents to query them.")
@@ -27,7 +32,6 @@ with st.sidebar:
             else:
                 st.error(f"Upload failed: {response.text}")
 
-# --- Main area: Q&A ---
 st.title("LocalRAG Docs")
 st.caption("Ask questions about your uploaded documents. Answers are grounded in your files, with sources shown below.")
 
@@ -54,6 +58,8 @@ if ask_clicked:
 
             st.markdown("### Sources")
             for source in result["sources"]:
+                # Expander keeps the page scannable — full chunk text is
+                # available on demand rather than dumped inline by default.
                 with st.expander(f"{source['source_file']} — Page {source['page']} · relevance {source['similarity_score']}"):
                     st.write(source["text"])
         else:
