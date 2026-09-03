@@ -1,10 +1,11 @@
 import streamlit as st
 import requests
+import os
 
 # Frontend and backend are intentionally separate processes. This file only
 # talks to the API over HTTP, the same way any external client would —
 # it has no direct access to the RAG pipeline's Python functions.
-API_URL = "http://127.0.0.1:8000"
+API_URL = os.getenv("API_URL", "http://127.0.0.1:8000")
 
 st.set_page_config(
     page_title="LocalRAG Docs",

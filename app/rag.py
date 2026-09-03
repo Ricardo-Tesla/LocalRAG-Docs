@@ -2,6 +2,11 @@ import chromadb
 from sentence_transformers import SentenceTransformer
 import ollama
 from app.ingestion import load_and_chunk_pdf
+import os
+from ollama import Client
+
+ollama_client = Client(host=os.getenv("OLLAMA_HOST", "http://localhost:11434"))
+
 
 # all-MiniLM-L6-v2: small (~80MB), CPU-friendly, 384-dim. Not the strongest
 # embedding model available, but the standard local baseline — swappable
@@ -91,7 +96,7 @@ def generate_answer(query: str) -> dict:
     sources = retrieve(query)
     prompt = build_prompt(query, sources)
 
-    response = ollama.chat(
+    response = ollama_client.chat(
         model="phi3",
         messages=[{"role": "user", "content": prompt}],
     )
