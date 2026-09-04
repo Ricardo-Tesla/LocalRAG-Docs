@@ -44,8 +44,14 @@ def ingest_pdf(pdf_path: str):
     print(f"Ingested {len(texts)} chunks from {pdf_path}")
 
 
-def retrieve(query: str, n_results: int = 5):
-    """Embed the query and fetch the most similar chunks, with metadata + scores."""
+def retrieve(query: str, n_results: int = 5, min_similarity: float = 0.2):
+    """Embed the query and fetch the most similar chunks, with metadata + scores.
+
+    Chunks below min_similarity are discarded — Chroma always returns the
+    closest N vectors regardless of how weak the match is, so this filters
+    out results that aren't actually relevant rather than presenting them
+    as if they were.
+    """
     query_embedding = embedding_model.encode(query).tolist()
     results = collection.query(
         query_embeddings=[query_embedding],
@@ -58,13 +64,15 @@ def retrieve(query: str, n_results: int = 5):
         results["metadatas"][0],
         results["distances"][0],
     ):
+        similarity_score = round(1 - distance, 3)
+        if similarity_score < min_similarity:
+            continue
+
         sources.append({
             "text": text,
             "page": metadata["page"],
             "source_file": metadata["source_file"],
-            # Chroma returns distance (lower = closer); this flips it to an
-            # intuitive similarity score (higher = more relevant).
-            "similarity_score": round(1 - distance, 3),
+            "similarity_score": similarity_score,
         })
     return sources
 
@@ -94,6 +102,13 @@ Answer:"""
 def generate_answer(query: str) -> dict:
     """Full RAG pipeline: retrieve -> build prompt -> generate -> return answer + sources."""
     sources = retrieve(query)
+
+    if not sources:
+        return {
+            "answer": "I don't have enough information in the uploaded documents to answer that.",
+            "sources": [],
+        }
+
     prompt = build_prompt(query, sources)
 
     response = ollama_client.chat(
