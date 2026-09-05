@@ -4,6 +4,7 @@ import ollama
 from app.ingestion import load_and_chunk_pdf
 import os
 from ollama import Client
+import uuid
 
 ollama_client = Client(host=os.getenv("OLLAMA_HOST", "http://localhost:11434"))
 
@@ -31,7 +32,7 @@ def ingest_pdf(pdf_path: str):
     chunks = load_and_chunk_pdf(pdf_path)
     texts = [c["text"] for c in chunks]
     metadatas = [{"page": c["page"], "source_file": c["source_file"]} for c in chunks]
-    ids = [f"chunk_{i}" for i in range(len(texts))]
+    ids = [f"{uuid.uuid4()}_{i}" for i in range(len(texts))]
 
     embeddings = embedding_model.encode(texts).tolist()
 
