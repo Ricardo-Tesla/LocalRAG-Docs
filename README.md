@@ -37,7 +37,7 @@ The system is composed of four layers, each with a single, well-defined responsi
 
 | Purpose | Tool |
 |---|---|
-| Language | Python 3.13 |
+| Language | Python 3.12 |
 | Document parsing | pypdf |
 | Text chunking | LangChain (RecursiveCharacterTextSplitter) |
 | Embeddings | sentence-transformers (all-MiniLM-L6-v2) |
@@ -46,6 +46,7 @@ The system is composed of four layers, each with a single, well-defined responsi
 | Backend API | FastAPI, Uvicorn |
 | Frontend | Streamlit |
 | Data validation | Pydantic |
+| Containerization | Docker, Docker Compose |
 
 All components are free, open-source, and run without any external network calls at inference time.
 
@@ -59,10 +60,13 @@ localrag-docs/
 │   ├── ingestion.py       # PDF loading and chunking, with page/source metadata
 │   ├── rag.py             # Embedding, vector storage, retrieval, prompt construction, generation
 │   ├── main.py            # FastAPI application (/health, /upload, /query)
-│   └── frontend.py        # Streamlit user interface
+│   ├── frontend.py        # Streamlit user interface
+│   └── evaluate.py        # Automated retrieval regression checks
 ├── data/
 │   └── uploads/           # Uploaded source documents
 ├── chroma_db/             # Persistent vector store (generated, not versioned)
+├── Dockerfile
+├── docker-compose.yml
 ├── requirements.txt
 └── README.md
 ```
@@ -75,12 +79,32 @@ The visual theme uses a warm, muted color palette (terracotta accents on a soft 
 
 ## Setup and Installation
 
-### Prerequisites
+Two ways to run the application are supported: directly on the host machine, or fully containerized via Docker Compose. Docker Compose is the recommended path, since it starts all three services (API, frontend, and the LLM runtime) with a single command and requires no local Python environment setup.
 
+### Option A: Docker Compose (recommended)
+
+**Prerequisites:** Docker Desktop.
+
+```bash
+git clone <repository-url>
+cd localrag-docs
+
+docker compose up --build
+```
+
+This builds and starts three containers: `backend` (FastAPI), `frontend` (Streamlit), and `ollama` (LLM runtime). On first run, pull the language model into the containerized Ollama instance:
+
+```bash
+docker exec -it localragdocs-ollama-1 ollama pull phi3
+```
+
+The model persists in a named Docker volume, so this step is only needed once. The frontend will be available at `http://localhost:8501`, and the API at `http://localhost:8000`.
+
+### Option B: Run directly on the host
+
+**Prerequisites:**
 - Python 3.10 or later
 - [Ollama](https://ollama.com) installed locally
-
-### Installation
 
 ```bash
 git clone <repository-url>
@@ -91,31 +115,30 @@ venv\Scripts\activate          # Windows
 # source venv/bin/activate     # macOS/Linux
 
 pip install -r requirements.txt
-```
-
-Pull a local language model via Ollama:
-
-```bash
 ollama pull phi3
 ```
 
-### Running the application
-
-The backend and frontend run as two separate processes.
-
-Start the API server:
+Run the backend and frontend as two separate processes:
 
 ```bash
 uvicorn app.main:app --reload
 ```
 
-In a second terminal, start the frontend:
+In a second terminal:
 
 ```bash
 streamlit run app/frontend.py
 ```
 
 The API will be available at `http://127.0.0.1:8000` (interactive documentation at `/docs`), and the user interface at `http://localhost:8501`.
+
+### Running the evaluation script
+
+A small set of regression checks validates that retrieval behaves correctly against known documents — that relevant questions return sources above the similarity threshold, that irrelevant questions correctly return none, and that sources are attributed to the correct document:
+
+```bash
+python -m app.evaluate
+```
 
 ## API Reference
 
@@ -135,11 +158,18 @@ Full request and response schemas are available via the auto-generated Swagger U
 
 **Grounded prompting.** The system prompt explicitly instructs the model to answer only from the retrieved context and to state when the context is insufficient, reducing (though not eliminating) the risk of hallucinated answers.
 
+**Similarity threshold.** Chroma always returns the closest available vectors regardless of how weak the actual match is, which previously meant a clearly unrelated question could still surface several low-confidence source chunks alongside a correct "I don't know" answer. A minimum cosine similarity threshold (0.2, set empirically from observed scores across relevant and irrelevant queries) filters these out before they reach either the language model or the user, and the pipeline returns an explicit "not enough information" response when no chunk clears it — without calling the LLM at all in that case.
+
+**Globally unique chunk identifiers.** Chunk IDs were originally generated per-ingestion (`chunk_0`, `chunk_1`, ...), which caused chunks from a newly ingested document to silently overwrite same-indexed chunks from a previously ingested document in the vector store, since Chroma treats a duplicate ID as an update. This was caught by the evaluation script, not manual testing. IDs are now prefixed with a UUID per ingestion call, guaranteeing uniqueness across all documents.
+
+**Automated retrieval evaluation.** `app/evaluate.py` runs a fixed set of test questions against the retrieval layer (not the LLM output, which is non-deterministic and harder to assert on) and checks that relevant questions return sources above threshold, irrelevant questions return none, and sources are attributed to the correct source document. This is a regression check intended to be re-run after any change to chunking, embeddings, or thresholds.
+
 ## Known Limitations
 
 - Retrieval quality is sensitive to query phrasing. Questions containing language about the interaction itself (e.g. "according to the document uploaded") introduce noise into the embedding and can reduce match quality compared to direct, content-focused questions.
-- The current retrieval count (`top_k`) is a fixed value and has not yet been tuned against a formal evaluation set.
-- Very short or broad queries may return moderate-confidence chunks in the absence of a strong match, since no minimum similarity threshold is currently enforced.
+- The current retrieval count (`top_k = 5`) and similarity threshold (`0.2`) were set from manual observation of this project's own test documents, not a formal evaluation set with ground-truth relevance labels.
+- Generation latency is high on CPU-only hardware (the target environment for this project, in keeping with its fully local design). A local language model running without GPU acceleration, further slowed by container virtualization, can take on the order of minutes to respond. Scaling this to production use would require GPU-accelerated inference, a smaller/quantized model, or a dedicated inference server.
+- `docker-compose.yml`'s `depends_on` guarantees container start order but not service readiness; a request sent to the backend immediately after `docker compose up` can fail before the API has finished initializing. A production setup would add explicit health checks.
 - The system has been tested with text-based PDFs; scanned or image-based documents would require an OCR step not yet implemented.
 
 ## Status
@@ -150,7 +180,7 @@ Full request and response schemas are available via the auto-generated Swagger U
 | 2 | Retrieval, grounded prompting, local LLM generation | Complete |
 | 3 | FastAPI backend with upload and query endpoints | Complete |
 | 4 | Streamlit frontend | Complete |
-| 5 | Containerization, retrieval tuning, evaluation | Planned |
+| 5 | Containerization, similarity threshold, evaluation script | Complete |
 | 6 | Multi-collection support, logging, testing | Planned |
 
 ## License
