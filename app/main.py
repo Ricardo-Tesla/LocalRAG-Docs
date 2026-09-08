@@ -47,8 +47,6 @@ def upload_document(file: UploadFile):
     with open(save_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    # Reuses the same ingestion path as the CLI/script entry point in
-    # rag.py — upload is just a different source for the file path.
-    ingest_pdf(str(save_path))
+    result = ingest_pdf(str(save_path))
 
-    return {"filename": file.filename, "status": "ingested"}
+    return result

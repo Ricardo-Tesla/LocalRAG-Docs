@@ -3,6 +3,7 @@ from sentence_transformers import SentenceTransformer
 import ollama
 from app.ingestion import load_and_chunk_pdf
 import os
+from pathlib import Path
 from ollama import Client
 import uuid
 
@@ -27,8 +28,21 @@ collection = client.get_or_create_collection(
 )
 
 
-def ingest_pdf(pdf_path: str):
-    """Load, chunk, embed, and store a PDF in the vector store."""
+def ingest_pdf(pdf_path: str) -> dict:
+    """Load, chunk, embed, and store a PDF in the vector store.
+
+    Skips ingestion if this exact filename has already been ingested,
+    preventing duplicate chunks from silently degrading retrieval quality
+    (a real issue we hit: re-ingesting the same file produced duplicate,
+    unmerged chunks that skewed similarity rankings).
+    """
+    filename = Path(pdf_path).name
+
+    existing = collection.get(where={"source_file": filename}, include=[])
+    if existing["ids"]:
+        print(f"Skipped: '{filename}' is already ingested ({len(existing['ids'])} existing chunks).")
+        return {"status": "skipped", "reason": "already_ingested", "filename": filename}
+
     chunks = load_and_chunk_pdf(pdf_path)
     texts = [c["text"] for c in chunks]
     metadatas = [{"page": c["page"], "source_file": c["source_file"]} for c in chunks]
@@ -43,6 +57,7 @@ def ingest_pdf(pdf_path: str):
         metadatas=metadatas,
     )
     print(f"Ingested {len(texts)} chunks from {pdf_path}")
+    return {"status": "ingested", "chunk_count": len(texts), "filename": filename}
 
 
 def retrieve(query: str, n_results: int = 5, min_similarity: float = 0.2):
@@ -122,17 +137,64 @@ def generate_answer(query: str) -> dict:
         "sources": sources,
     }
 
+def generate_query_variants(question: str, n_variants: int = 2) -> list[str]:
+    """
+    Ask the LLM for alternative phrasings of the question, to compensate for
+    retrieval's sensitivity to exact wording (see Known Limitations, v1).
+    Returns the original question plus up to n_variants alternatives.
+    """
+    prompt = f"""Generate {n_variants} alternative phrasings of the following question.
+The alternatives should ask for the same information using different words.
+Return ONLY the alternative questions, one per line, with no numbering or extra text.
+
+Original question: {question}"""
+
+    response = ollama_client.chat(
+        model="phi3",
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    variants = [
+        line.strip()
+        for line in response["message"]["content"].strip().split("\n")
+        if line.strip()
+    ]
+
+    return [question] + variants[:n_variants]
+
+def retrieve_multi_query(question: str, n_results: int = 5, min_similarity: float = 0.2) -> list[dict]:
+    """
+    Retrieve using the original question plus LLM-generated rephrasings,
+    merging results and keeping each chunk's best score across all variants.
+    """
+    variants = generate_query_variants(question)
+
+    best_by_id = {}
+    for variant in variants:
+        results = retrieve(variant, n_results=n_results, min_similarity=min_similarity)
+        for source in results:
+            key = (source["source_file"], source["page"], source["text"])
+            if key not in best_by_id or source["similarity_score"] > best_by_id[key]["similarity_score"]:
+                best_by_id[key] = source
+
+    merged = sorted(best_by_id.values(), key=lambda s: s["similarity_score"], reverse=True)
+    return merged[:n_results]
 
 if __name__ == "__main__":
-    # Manual entry point for local testing outside the API — the FastAPI
-    # /upload and /query endpoints call these same functions directly.
-    ingest_pdf("data/uploads/sample.pdf")
+    import time
 
-    question = "What are the key responsibilities?"
-    result = generate_answer(question)
+    question = "What is the first use case according to the document uploaded?"
 
-    print("Question:", question)
-    print("\nAnswer:", result["answer"])
-    print("\n--- Sources ---")
-    for s in result["sources"]:
-        print(f"Page {s['page']} (score: {s['similarity_score']}): {s['text'][:80]}...")
+    print("--- Single-query retrieve (baseline) ---")
+    start = time.time()
+    baseline = retrieve(question)
+    print(f"Took {time.time() - start:.1f}s, {len(baseline)} sources")
+    for s in baseline:
+        print(f"  {s['source_file']} p{s['page']} — {s['similarity_score']}")
+
+    print("\n--- Multi-query retrieve ---")
+    start = time.time()
+    multi = retrieve_multi_query(question)
+    print(f"Took {time.time() - start:.1f}s, {len(multi)} sources")
+    for s in multi:
+        print(f"  {s['source_file']} p{s['page']} — {s['similarity_score']}")
