@@ -48,7 +48,7 @@ if ask_clicked:
     if not question.strip():
         st.warning("Please enter a question first.")
     else:
-        with st.spinner("Thinking..."):
+        with st.spinner("Searching from multiple angles and generating a grounded answer — this can take a minute..."):
             response = requests.post(f"{API_URL}/query", json={"question": question})
 
         if response.status_code == 200:

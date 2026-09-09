@@ -8,6 +8,41 @@ LocalRAG Docs allows a user to upload one or more PDF documents and ask natural-
 
 The entire pipeline — document parsing, embedding generation, vector search, and language model inference — runs locally. No document content, queries, or generated answers leave the user's machine at any point.
 
+## Version 2: Upgrade Rationale
+
+Version 1 established a complete, working local RAG pipeline: ingestion, chunking, embeddings, vector storage, grounded generation, and source attribution, wrapped in a FastAPI backend and Streamlit frontend, containerized with Docker.
+
+Testing v1 against real, varied documents surfaced a specific, recurring weakness: **retrieval quality was highly sensitive to how literally a question was phrased.** For example, the question *"What is the first use case according to the document uploaded?"* returned largely irrelevant sources (top similarity score 0.272, majority from the wrong document), while a more direct phrasing of the identical underlying question — *"What are the use cases proposed?"* — scored substantially higher against the correct document. This is a known limitation of pure semantic (embedding-based) retrieval: it matches meaning *and* wording together, not intent alone.
+
+Version 2 addresses this and related gaps through a set of advanced retrieval and evaluation techniques, developed as targeted responses to specific weaknesses observed in v1 — not a speculative rewrite. Every addition is held to the same three constraints the project was built on:
+
+- **Privacy** — no addition may introduce a call to an external API or service. Where an upgrade needs a model (e.g. for query rephrasing or re-ranking), it uses a local model, consistent with the project's fully-local design.
+- **Performance** — since local, CPU-only LLM inference is already the dominant latency cost (documented in Known Limitations), every addition's latency impact is measured and stated explicitly, and expensive techniques are made opt-in rather than silently changing default behavior.
+- **Security** — file handling, input validation, and error handling are held to the same standard introduced for the original endpoints, extended to any new ones.
+
+### v1 → v2 comparison
+
+| Capability | Version 1 | Version 2 |
+|---|---|---|
+| Retrieval | Single query, vector similarity only | Multi-query generation, merged and deduplicated across phrasings |
+| Search method | Semantic (embeddings) only | *(planned)* Hybrid: semantic + keyword (BM25) |
+| Result ordering | Raw similarity score | *(planned)* Cross-encoder re-ranking of shortlisted candidates |
+| Evaluation | Retrieval-only regression checks | *(planned)* Answer-level grounding/faithfulness checks |
+| Observability | Console logging | *(planned)* Structured request logging and basic metrics |
+
+### Measured impact: multi-query generation
+
+Using the same test question that originally exposed the phrasing-sensitivity weakness:
+
+| | Single-query (v1) | Multi-query (v2) |
+|---|---|---|
+| Top result correctness | Wrong document | Correct document |
+| Top similarity score | 0.272 | 0.282 |
+| Correct-document sources (of top 5) | 1 | 4 |
+| Latency | ~0.4s | ~25s |
+
+Multi-query generation issues one additional LLM call to produce alternative phrasings of the user's question, then retrieves for each and merges results, before returning to the standard pipeline. The latency cost is real and directly traded against retrieval accuracy — see Known Limitations for how this is currently handled.
+
 ## Motivation
 
 Organizations in regulated or sensitive sectors (financial services, healthcare, industrial and manufacturing operations) frequently need to query internal technical documentation but cannot send proprietary or confidential content to third-party AI APIs. LocalRAG Docs demonstrates a production-oriented architecture for this exact requirement: a complete RAG pipeline with source transparency, built entirely on open-source, self-hostable components.

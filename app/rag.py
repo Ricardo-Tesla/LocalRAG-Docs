@@ -116,8 +116,15 @@ Answer:"""
 
 
 def generate_answer(query: str) -> dict:
-    """Full RAG pipeline: retrieve -> build prompt -> generate -> return answer + sources."""
-    sources = retrieve(query)
+    """
+    Full RAG pipeline: retrieve -> build prompt -> generate -> return answer + sources.
+
+    Uses multi-query retrieval by default (v2) rather than a single embedding
+    search — this trades ~25s of added latency for meaningfully better
+    retrieval on ambiguously or awkwardly phrased questions (see README,
+    Version 2: Upgrade Rationale).
+    """
+    sources = retrieve_multi_query(query)
 
     if not sources:
         return {
