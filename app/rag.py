@@ -9,7 +9,7 @@ import os
 from rank_bm25 import BM25Okapi
 import nltk
 from nltk.corpus import stopwords
-
+import hashlib
 import re
 
 def _tokenize(text: str) -> list[str]:
@@ -140,21 +140,32 @@ def retrieve_hybrid(query: str, n_results: int = 5, rrf_k: int = 60) -> list[dic
 def ingest_pdf(pdf_path: str) -> dict:
     """Load, chunk, embed, and store a PDF in the vector store.
 
-    Skips ingestion if this exact filename has already been ingested,
-    preventing duplicate chunks from silently degrading retrieval quality
-    (a real issue we hit: re-ingesting the same file produced duplicate,
-    unmerged chunks that skewed similarity rankings).
+    Skips ingestion if this exact filename OR this exact file content has
+    already been ingested. Filename-only checking wasn't enough in
+    practice — the same resume was uploaded twice under two slightly
+    different filenames, doubling its representation in the corpus and
+    visibly distorting BM25's term-rarity statistics (see README, v2
+    upgrade notes). Content hashing catches this regardless of filename.
     """
     filename = Path(pdf_path).name
 
-    existing = collection.get(where={"source_file": filename}, include=[])
-    if existing["ids"]:
-        print(f"Skipped: '{filename}' is already ingested ({len(existing['ids'])} existing chunks).")
+    with open(pdf_path, "rb") as f:
+        file_hash = hashlib.sha256(f.read()).hexdigest()
+
+    existing_by_name = collection.get(where={"source_file": filename}, include=[])
+    if existing_by_name["ids"]:
+        print(f"Skipped: '{filename}' is already ingested ({len(existing_by_name['ids'])} existing chunks).")
         return {"status": "skipped", "reason": "already_ingested", "filename": filename}
+
+    existing_by_hash = collection.get(where={"content_hash": file_hash}, include=["metadatas"])
+    if existing_by_hash["ids"]:
+        matched_file = existing_by_hash["metadatas"][0]["source_file"]
+        print(f"Skipped: '{filename}' has identical content to already-ingested '{matched_file}'.")
+        return {"status": "skipped", "reason": "duplicate_content", "filename": filename, "matches": matched_file}
 
     chunks = load_and_chunk_pdf(pdf_path)
     texts = [c["text"] for c in chunks]
-    metadatas = [{"page": c["page"], "source_file": c["source_file"]} for c in chunks]
+    metadatas = [{"page": c["page"], "source_file": c["source_file"], "content_hash": file_hash} for c in chunks]
     ids = [f"{uuid.uuid4()}_{i}" for i in range(len(texts))]
 
     embeddings = embedding_model.encode(texts).tolist()
@@ -171,7 +182,6 @@ def ingest_pdf(pdf_path: str) -> dict:
     _bm25_index = None  # invalidate cache; rebuilt lazily on next retrieval
 
     return {"status": "ingested", "chunk_count": len(texts), "filename": filename}
-
 
 def retrieve(query: str, n_results: int = 5, min_similarity: float = 0.2):
     """Embed the query and fetch the most similar chunks, with metadata + scores.
