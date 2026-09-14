@@ -340,7 +340,30 @@ def rerank(query: str, candidates: list[dict], top_n: int = 5) -> list[dict]:
 
     reranked = sorted(candidates, key=lambda c: c["rerank_score"], reverse=True)
     return reranked[:top_n]
+def retrieve_advanced(question: str, n_results: int = 5) -> list[dict]:
+    """
+    Full advanced retrieval pipeline: multi-query -> hybrid search per
+    variant -> merge -> cross-encoder re-rank.
 
+    Each stage compensates for a different weakness observed in earlier
+    testing: multi-query for phrasing sensitivity, hybrid search for
+    exact-term matches semantic search under-ranks, and re-ranking for
+    final precision once independent scoring methods have narrowed the
+    field. Re-ranking runs once over the merged pool, not per variant,
+    since it's the most expensive stage per comparison.
+    """
+    variants = generate_query_variants(question)
+
+    merged = {}
+    for variant in variants:
+        candidates = retrieve_hybrid(variant, n_results=10)
+        for c in candidates:
+            key = (c["source_file"], c["page"], c["text"])
+            if key not in merged or c["similarity_score"] > merged[key]["similarity_score"]:
+                merged[key] = c
+
+    candidate_pool = list(merged.values())
+    return rerank(question, candidate_pool, top_n=n_results)
 
 if __name__ == "__main__":
     import time
@@ -360,35 +383,29 @@ if __name__ == "__main__":
     print(f"Took {time.time() - start:.1f}s, {len(multi)} sources")
     for s in multi:
         print(f"  {s['source_file']} p{s['page']} — {s['similarity_score']}")
-        
-        
+
     print("\n--- BM25 keyword search ---")
     bm25_results = _bm25_search("Smart Market Matchmaker")
     for r in bm25_results:
         print(f"  {r['source_file']} p{r['page']} — bm25_score={r['bm25_score']}")
-        
+
     print("\n--- Hybrid retrieve ---")
     start = time.time()
     hybrid = retrieve_hybrid("What are the use cases proposed?")
     print(f"Took {time.time() - start:.1f}s, {len(hybrid)} sources")
     for s in hybrid:
         print(f"  {s['source_file']} p{s['page']} — {s['similarity_score']}")
-        
-    print("\n--- DEBUG: raw candidates feeding the merge ---")
-    debug_question = "What are the use cases proposed?"
 
-    print("Vector candidates (top 15, no threshold):")
-    for rank, r in enumerate(retrieve(debug_question, n_results=15, min_similarity=0.0), start=1):
-        print(f"  rank {rank}: {r['source_file']} p{r['page']} — score={r['similarity_score']}")
-
-    print("\nBM25 candidates (top 15):")
-    for rank, r in enumerate(_bm25_search(debug_question, n_results=15), start=1):
-        print(f"  rank {rank}: {r['source_file']} p{r['page']} — bm25_score={r['bm25_score']}")
-    
-    
     print("\n--- Re-ranked hybrid results ---")
     hybrid_candidates = retrieve_hybrid("What are the use cases proposed?", n_results=15)
     reranked = rerank("What are the use cases proposed?", hybrid_candidates, top_n=5)
     for r in reranked:
         print(f"  {r['source_file']} p{r['page']} — rerank_score={r['rerank_score']}")
+
+    print("\n--- Full advanced pipeline (multi-query + hybrid + rerank) ---")
+    start = time.time()
+    advanced = retrieve_advanced("What are the use cases proposed?")
+    print(f"Took {time.time() - start:.1f}s, {len(advanced)} sources")
+    for s in advanced:
+        print(f"  {s['source_file']} p{s['page']} — rerank_score={s.get('rerank_score')}")
         
