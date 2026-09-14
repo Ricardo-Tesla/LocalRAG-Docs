@@ -11,6 +11,15 @@ import nltk
 from nltk.corpus import stopwords
 import hashlib
 import re
+from sentence_transformers import CrossEncoder
+
+# Small, CPU-friendly cross-encoder for re-ranking a short candidate list.
+# Unlike embedding-based similarity (which scores query and chunk
+# independently), a cross-encoder processes them together, producing a
+# more accurate relevance judgment — at a cost too high to apply to the
+# whole corpus, so it's only used to re-order an already-narrowed shortlist.
+reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+
 
 def _tokenize(text: str) -> list[str]:
     """Lowercase, strip punctuation, split on whitespace, remove stopwords."""
@@ -312,6 +321,26 @@ def generate_answer(query: str) -> dict:
         "sources": sources,
     }
 
+def rerank(query: str, candidates: list[dict], top_n: int = 5) -> list[dict]:
+    """
+    Re-order a candidate list by cross-encoder relevance to the query.
+
+    Takes broader, cheaper retrieval (vector/BM25/hybrid) results as
+    input and re-scores each (query, chunk) pair jointly for a more
+    accurate final ranking than either method's independent scoring.
+    """
+    if not candidates:
+        return []
+
+    pairs = [[query, c["text"]] for c in candidates]
+    scores = reranker.predict(pairs)
+
+    for candidate, score in zip(candidates, scores):
+        candidate["rerank_score"] = round(float(score), 3)
+
+    reranked = sorted(candidates, key=lambda c: c["rerank_score"], reverse=True)
+    return reranked[:top_n]
+
 
 if __name__ == "__main__":
     import time
@@ -355,3 +384,11 @@ if __name__ == "__main__":
     print("\nBM25 candidates (top 15):")
     for rank, r in enumerate(_bm25_search(debug_question, n_results=15), start=1):
         print(f"  rank {rank}: {r['source_file']} p{r['page']} — bm25_score={r['bm25_score']}")
+    
+    
+    print("\n--- Re-ranked hybrid results ---")
+    hybrid_candidates = retrieve_hybrid("What are the use cases proposed?", n_results=15)
+    reranked = rerank("What are the use cases proposed?", hybrid_candidates, top_n=5)
+    for r in reranked:
+        print(f"  {r['source_file']} p{r['page']} — rerank_score={r['rerank_score']}")
+        
