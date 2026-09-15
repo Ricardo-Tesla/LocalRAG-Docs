@@ -1,24 +1,23 @@
 import chromadb
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, CrossEncoder
 import ollama
 from ollama import Client
 from app.ingestion import load_and_chunk_pdf
 from pathlib import Path
 import uuid
 import os
-from rank_bm25 import BM25Okapi
+import re
+import hashlib
 import nltk
 from nltk.corpus import stopwords
-import hashlib
-import re
-from sentence_transformers import CrossEncoder
+from rank_bm25 import BM25Okapi
 
-# Small, CPU-friendly cross-encoder for re-ranking a short candidate list.
-# Unlike embedding-based similarity (which scores query and chunk
-# independently), a cross-encoder processes them together, producing a
-# more accurate relevance judgment — at a cost too high to apply to the
-# whole corpus, so it's only used to re-order an already-narrowed shortlist.
-reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+# --- Stopwords setup (needed by _tokenize, defined right after) ---
+try:
+    STOPWORDS = set(stopwords.words("english"))
+except LookupError:
+    nltk.download("stopwords")
+    STOPWORDS = set(stopwords.words("english"))
 
 
 def _tokenize(text: str) -> list[str]:
@@ -27,18 +26,19 @@ def _tokenize(text: str) -> list[str]:
     return [word for word in text.split() if word not in STOPWORDS]
 
 
-try:
-    STOPWORDS = set(stopwords.words("english"))
-except LookupError:
-    nltk.download("stopwords")
-    STOPWORDS = set(stopwords.words("english"))
-    
 ollama_client = Client(host=os.getenv("OLLAMA_HOST", "http://localhost:11434"))
 
 # all-MiniLM-L6-v2: small (~80MB), CPU-friendly, 384-dim. Not the strongest
 # embedding model available, but the standard local baseline — swappable
 # later without touching the rest of the pipeline.
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+# Small, CPU-friendly cross-encoder for re-ranking a short candidate list.
+# Unlike embedding-based similarity (which scores query and chunk
+# independently), a cross-encoder processes them together, producing a
+# more accurate relevance judgment — at a cost too high to apply to the
+# whole corpus, so it's only used to re-order an already-narrowed shortlist.
+reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
 client = chromadb.PersistentClient(path="chroma_db")
 
@@ -68,12 +68,12 @@ def _build_bm25_index():
     metadatas = all_chunks["metadatas"]
 
     tokenized = [_tokenize(text) for text in texts]
-    
     _bm25_index = BM25Okapi(tokenized)
     _bm25_chunk_lookup = [
         {"text": text, "page": meta["page"], "source_file": meta["source_file"]}
         for text, meta in zip(texts, metadatas)
     ]
+
 
 def _bm25_search(query: str, n_results: int = 5) -> list[dict]:
     """
@@ -104,47 +104,6 @@ def _bm25_search(query: str, n_results: int = 5) -> list[dict]:
     scored_chunks.sort(key=lambda c: c["bm25_score"], reverse=True)
     return scored_chunks[:n_results]
 
-def retrieve_hybrid(query: str, n_results: int = 5, rrf_k: int = 60) -> list[dict]:
-    """
-    Combine vector similarity search and BM25 keyword search using
-    Reciprocal Rank Fusion (RRF) rather than raw score averaging.
-
-    An earlier version combined raw normalized scores directly, but with
-    a small corpus (~100 chunks), per-query max-normalization proved
-    unstable: a single coincidental keyword match could be the top result
-    in a weak field, then get inflated to a score of 1.0, outranking
-    genuinely relevant results. RRF avoids this entirely by combining
-    RANK POSITIONS instead of raw scores, so no single method's score
-    scale can dominate or distort the merge.
-    """
-    vector_results = retrieve(query, n_results=n_results * 3, min_similarity=0.0)
-    bm25_results = _bm25_search(query, n_results=n_results * 3)
-
-    rrf_scores = {}
-    chunk_info = {}
-
-    for rank, r in enumerate(vector_results, start=1):
-        key = (r["source_file"], r["page"], r["text"])
-        rrf_scores[key] = rrf_scores.get(key, 0) + 1 / (rrf_k + rank)
-        chunk_info[key] = r
-
-    for rank, r in enumerate(bm25_results, start=1):
-        key = (r["source_file"], r["page"], r["text"])
-        rrf_scores[key] = rrf_scores.get(key, 0) + 1 / (rrf_k + rank)
-        chunk_info.setdefault(key, r)
-
-    results = []
-    for key, score in rrf_scores.items():
-        info = chunk_info[key]
-        results.append({
-            "text": info["text"],
-            "page": info["page"],
-            "source_file": info["source_file"],
-            "similarity_score": round(score, 4),
-        })
-
-    results.sort(key=lambda s: s["similarity_score"], reverse=True)
-    return results[:n_results]
 
 def ingest_pdf(pdf_path: str) -> dict:
     """Load, chunk, embed, and store a PDF in the vector store.
@@ -192,6 +151,7 @@ def ingest_pdf(pdf_path: str) -> dict:
 
     return {"status": "ingested", "chunk_count": len(texts), "filename": filename}
 
+
 def retrieve(query: str, n_results: int = 5, min_similarity: float = 0.2):
     """Embed the query and fetch the most similar chunks, with metadata + scores.
 
@@ -225,26 +185,75 @@ def retrieve(query: str, n_results: int = 5, min_similarity: float = 0.2):
     return sources
 
 
-def build_prompt(query: str, sources: list[dict]) -> str:
-    """Combine retrieved chunks + question into a grounded prompt."""
-    context = "\n\n---\n\n".join(
-        f"[Page {s['page']}] {s['text']}" for s in sources
-    )
+def retrieve_hybrid(query: str, n_results: int = 5, rrf_k: int = 60) -> list[dict]:
+    """
+    Combine vector similarity search and BM25 keyword search using
+    Reciprocal Rank Fusion (RRF) rather than raw score averaging.
 
-    # Explicitly instructed to refuse rather than guess when context is
-    # insufficient — this is what makes the system "grounded" instead of
-    # a general-purpose chatbot with extra text pasted in.
-    prompt = f"""You are a helpful assistant answering questions based ONLY on the context below.
-If the answer is not contained in the context, say "I don't have enough information to answer that."
-Do not use any outside knowledge.
+    An earlier version combined raw normalized scores directly, but with
+    a small corpus (~100 chunks), per-query max-normalization proved
+    unstable: a single coincidental keyword match could be the top result
+    in a weak field, then get inflated to a score of 1.0, outranking
+    genuinely relevant results. RRF avoids this entirely by combining
+    RANK POSITIONS instead of raw scores, so no single method's score
+    scale can dominate or distort the merge.
+    """
+    vector_results = retrieve(query, n_results=n_results * 3, min_similarity=0.0)
+    bm25_results = _bm25_search(query, n_results=n_results * 3)
 
-Context:
-{context}
+    rrf_scores = {}
+    chunk_info = {}
 
-Question: {query}
+    for rank, r in enumerate(vector_results, start=1):
+        key = (r["source_file"], r["page"], r["text"])
+        rrf_scores[key] = rrf_scores.get(key, 0) + 1 / (rrf_k + rank)
+        chunk_info[key] = r
 
-Answer:"""
-    return prompt
+    for rank, r in enumerate(bm25_results, start=1):
+        key = (r["source_file"], r["page"], r["text"])
+        rrf_scores[key] = rrf_scores.get(key, 0) + 1 / (rrf_k + rank)
+        chunk_info.setdefault(key, r)
+
+    results = []
+    for key, score in rrf_scores.items():
+        info = chunk_info[key]
+        results.append({
+            "text": info["text"],
+            "page": info["page"],
+            "source_file": info["source_file"],
+            "similarity_score": round(score, 4),
+        })
+
+    results.sort(key=lambda s: s["similarity_score"], reverse=True)
+    return results[:n_results]
+
+
+def rerank(query: str, candidates: list[dict], top_n: int = 5, min_rerank_score: float = 0.0) -> list[dict]:
+    """
+    Re-order a candidate list by cross-encoder relevance to the query.
+
+    Takes broader, cheaper retrieval (vector/BM25/hybrid) results as
+    input and re-scores each (query, chunk) pair jointly for a more
+    accurate final ranking than either method's independent scoring.
+
+    Cross-encoder scores are unbounded and can be negative — unlike our
+    0-1 similarity threshold, min_rerank_score=0.0 is a reasonable default
+    cutoff (positive scores indicate genuine relevance) rather than an
+    empirically-tuned constant, since we lack the labeled data to tune
+    this precisely yet.
+    """
+    if not candidates:
+        return []
+
+    pairs = [[query, c["text"]] for c in candidates]
+    scores = reranker.predict(pairs)
+
+    for candidate, score in zip(candidates, scores):
+        candidate["rerank_score"] = round(float(score), 3)
+
+    reranked = sorted(candidates, key=lambda c: c["rerank_score"], reverse=True)
+    filtered = [c for c in reranked if c["rerank_score"] >= min_rerank_score]
+    return filtered[:top_n]
 
 
 def generate_query_variants(question: str, n_variants: int = 2) -> list[str]:
@@ -292,54 +301,6 @@ def retrieve_multi_query(question: str, n_results: int = 5, min_similarity: floa
     return merged[:n_results]
 
 
-def generate_answer(query: str) -> dict:
-    """
-    Full RAG pipeline: retrieve -> build prompt -> generate -> return answer + sources.
-
-    Uses multi-query retrieval by default (v2) rather than a single embedding
-    search — this trades ~25s of added latency for meaningfully better
-    retrieval on ambiguously or awkwardly phrased questions (see README,
-    Version 2: Upgrade Rationale).
-    """
-    sources = retrieve_multi_query(query)
-
-    if not sources:
-        return {
-            "answer": "I don't have enough information in the uploaded documents to answer that.",
-            "sources": [],
-        }
-
-    prompt = build_prompt(query, sources)
-
-    response = ollama_client.chat(
-        model="phi3",
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    return {
-        "answer": response["message"]["content"],
-        "sources": sources,
-    }
-
-def rerank(query: str, candidates: list[dict], top_n: int = 5) -> list[dict]:
-    """
-    Re-order a candidate list by cross-encoder relevance to the query.
-
-    Takes broader, cheaper retrieval (vector/BM25/hybrid) results as
-    input and re-scores each (query, chunk) pair jointly for a more
-    accurate final ranking than either method's independent scoring.
-    """
-    if not candidates:
-        return []
-
-    pairs = [[query, c["text"]] for c in candidates]
-    scores = reranker.predict(pairs)
-
-    for candidate, score in zip(candidates, scores):
-        candidate["rerank_score"] = round(float(score), 3)
-
-    reranked = sorted(candidates, key=lambda c: c["rerank_score"], reverse=True)
-    return reranked[:top_n]
 def retrieve_advanced(question: str, n_results: int = 5) -> list[dict]:
     """
     Full advanced retrieval pipeline: multi-query -> hybrid search per
@@ -364,6 +325,61 @@ def retrieve_advanced(question: str, n_results: int = 5) -> list[dict]:
 
     candidate_pool = list(merged.values())
     return rerank(question, candidate_pool, top_n=n_results)
+
+
+def build_prompt(query: str, sources: list[dict]) -> str:
+    """Combine retrieved chunks + question into a grounded prompt."""
+    context = "\n\n---\n\n".join(
+        f"[Page {s['page']}] {s['text']}" for s in sources
+    )
+
+    # Explicitly instructed to refuse rather than guess when context is
+    # insufficient — this is what makes the system "grounded" instead of
+    # a general-purpose chatbot with extra text pasted in.
+    prompt = f"""You are a helpful assistant answering questions based ONLY on the context below.
+If the answer is not contained in the context, say "I don't have enough information to answer that."
+Do not use any outside knowledge.
+
+Context:
+{context}
+
+Question: {query}
+
+Answer:"""
+    return prompt
+
+
+def generate_answer(query: str) -> dict:
+    """
+    Full RAG pipeline: advanced retrieval -> build prompt -> generate -> return answer + sources.
+
+    v2: uses the full advanced retrieval pipeline (multi-query generation,
+    hybrid vector+keyword search, cross-encoder re-ranking) rather than a
+    single embedding search or multi-query alone. Each stage was added to
+    address a specific, measured weakness in earlier versions (see README,
+    Version 2: Upgrade Rationale). Latency is meaningfully higher than v1's
+    single-query search as a result — an explicit, documented trade-off.
+    """
+    sources = retrieve_advanced(query)
+
+    if not sources:
+        return {
+            "answer": "I don't have enough information in the uploaded documents to answer that.",
+            "sources": [],
+        }
+
+    prompt = build_prompt(query, sources)
+
+    response = ollama_client.chat(
+        model="phi3",
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    return {
+        "answer": response["message"]["content"],
+        "sources": sources,
+    }
+
 
 if __name__ == "__main__":
     import time
@@ -408,4 +424,3 @@ if __name__ == "__main__":
     print(f"Took {time.time() - start:.1f}s, {len(advanced)} sources")
     for s in advanced:
         print(f"  {s['source_file']} p{s['page']} — rerank_score={s.get('rerank_score')}")
-        
