@@ -8,6 +8,28 @@ LocalRAG Docs allows a user to upload one or more PDF documents and ask natural-
 
 The entire pipeline — document parsing, embedding generation, vector search, and language model inference — runs locally. No document content, queries, or generated answers leave the user's machine at any point.
 
+## How to Use This App
+
+**There is no live hosted demo, by design.** LocalRAG Docs is built to run entirely on your own machine, so that no document, question, or answer ever leaves your device — that privacy guarantee is the core point of the project, not an afterthought. This means there's no link to click and try it instantly in a browser; instead, anyone wanting to use it runs it locally, the same way you'd run a tool like Ollama or a self-hosted app such as Jellyfin or Home Assistant.
+
+For a quick look at the app in action without installing anything, see the demo video linked from this repository or my portfolio. To actually run it yourself:
+
+**Prerequisites:** [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running.
+
+```bash
+git clone <this-repository-url>
+cd localrag-docs
+docker compose up --build
+```
+
+Then, one time only, pull the language model into the running Ollama container:
+
+```bash
+docker exec -it localragdocs-ollama-1 ollama pull phi3
+```
+
+Once both steps finish, open `http://localhost:8501` in your browser. The app is now running entirely on your machine — upload a PDF, ask a question, and see grounded, source-attributed answers with no data sent anywhere else. Full setup details, including running without Docker, are in the Setup and Installation section below.
+
 ## Version 2: Upgrade Rationale
 
 Version 1 established a complete, working local RAG pipeline: ingestion, chunking, embeddings, vector storage, grounded generation, and source attribution, wrapped in a FastAPI backend and Streamlit frontend, containerized with Docker.
@@ -162,6 +184,8 @@ python -m app.evaluate
 **Automated retrieval evaluation.** `app/evaluate.py` runs a fixed set of test questions against the retrieval layer directly (not final LLM output, which is non-deterministic) and checks that relevant questions return sources above threshold, irrelevant questions return none, and sources are attributed to the correct source document. This caught the chunk-ID collision bug described above before it was noticed through manual testing.
 
 **Dependency hygiene.** `requirements.txt` was found to contain a large number of packages unrelated to this project (Django, Flask, Kubernetes tooling, full CUDA/GPU PyTorch dependencies) after having been generated via `pip freeze` from a Python environment shared with other, unrelated work. This bloated Docker image builds to 1200+ seconds and pulled in over a gigabyte of unused NVIDIA/CUDA libraries for a project that runs LLM inference on CPU only. The fix was to rebuild the virtual environment from scratch, installing only the packages this project actually imports, and explicitly installing PyTorch's CPU-only build via its dedicated package index (`--extra-index-url https://download.pytorch.org/whl/cpu`) rather than letting pip resolve a default build that may include GPU support. The Dockerfile's `pip install` step was updated to reference the same index, since a `+cpu`-tagged package version exists only there, not on the default PyPI index.
+
+**No hosted live demo.** Deploying to a platform like Streamlit Community Cloud would require restructuring the app into a single process (no Docker Compose, no separate FastAPI service), replacing local Ollama inference with a hosted LLM API, and accepting an ephemeral, non-persistent vector store. This was a deliberate trade-off against the project's core privacy guarantee rather than a limitation to fix — the local-only architecture is the point, not an obstacle. See "How to Use This App" near the top of this document for running it locally instead.
 
 ## Known Limitations
 
